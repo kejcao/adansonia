@@ -24,11 +24,15 @@ use ratatui::{
 #[derive(Debug, Clone)]
 struct Info {
     size: u64,
+    is_dir: bool,
 }
 
 impl Info {
     fn new() -> Info {
-        return Info { size: 0 };
+        return Info {
+            size: 0,
+            is_dir: true,
+        };
     }
 }
 
@@ -60,11 +64,19 @@ impl Tree {
         } else {
             self.info = Info {
                 size: metadata.size(),
+                is_dir: metadata.is_dir(),
             };
         }
     }
 
-    fn compute_directory_sizes(self: &mut Self) {}
+    fn init(self: &mut Self) {
+        if self.info.is_dir {
+            for (_, tree) in self.children.iter_mut() {
+                tree.init();
+            }
+            self.info.size = self.children.values().map(|tree| tree.info.size).sum();
+        }
+    }
 
     fn find(self: &Self, p: &Path) -> &Tree {
         let mut t = self;
@@ -93,6 +105,7 @@ fn scan(folder: &Path) -> Tree {
                 .map(|x| x.as_os_str().to_os_string()),
         );
     }
+    tree.init();
     tree
 }
 
