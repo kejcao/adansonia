@@ -8,18 +8,19 @@ use jwalk::Parallelism;
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
-use ratatui::Terminal;
 use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
+use ratatui::{Frame, Terminal};
 use rayon::prelude::*;
+use std::env;
 use std::fs::Metadata;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{exit, Command};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
@@ -94,24 +95,57 @@ fn scan(folder: &Path) -> Tree {
 
 struct StatefulList {
     state: ListState,
+    area: Rect,
     items: Vec<Info>,
 }
 
 impl StatefulList {
-    // fn new(items: Vec<info>) -> StatefulList<T> {
-    //     let mut state = ListState::default();
-    //     state.select(Some(0));
-    //     StatefulList { state, items }
-    // }
-    //
-    // fn select(&mut self, index: Option<usize>) {
-    //     self.state.select(index);
-    // }
+    fn new() -> StatefulList {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        StatefulList {
+            state,
+            area: Rect::default(),
+            items: Vec::new(),
+        }
+    }
+
+    fn render(self: &mut Self, frame: &mut Frame, status: String) {
+        self.area = frame.area();
+        let list = List::new(self.items.clone().into_iter().map(|i| {
+            ListItem::new(Span::styled(
+                format!("{:>8} {:?}", ByteSize(i.size), i.path.file_name().unwrap()),
+                Style::default().fg(if i.is_dir { Color::Blue } else { Color::White }),
+            ))
+        }))
+        .block(Block::bordered().title(status))
+        .style(Style::new().white())
+        .highlight_style(
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ")
+        .repeat_highlight_symbol(true)
+        .direction(ListDirection::TopToBottom);
+
+        frame.render_stateful_widget(list, frame.area(), &mut self.state);
+    }
 }
 
 fn main() {
-    let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
-    let mut depths = vec![0];
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 2 {
+        eprintln!("usage: adansonia [directory]");
+        exit(1);
+    }
+    let mut cwd = if args.len() == 2 {
+        Path::new(&args[1]).to_path_buf()
+    } else {
+        Path::new(".").to_path_buf()
+    };
+
     let now = Instant::now();
     let mut tree = scan(&cwd);
     tree.accumulate();
@@ -124,49 +158,32 @@ fn main() {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let mut list_state = ListState::default();
-    let mut list_area = Rect::default();
-    list_state.select(Some(0));
+    let mut depths = vec![0]; // to restore selections when moving back
+    let mut list: StatefulList = StatefulList::new();
+    list.items = tree.get(&cwd);
 
-    let mut items: Vec<_> = tree.get(&cwd);
     loop {
         terminal
             .draw(|frame| {
-                list_area = frame.area();
-                let list = List::new(items.clone().into_iter().map(|i| {
-                    ListItem::new(Span::styled(
-                        format!("{:>8} {:?}", ByteSize(i.size), i.path.file_name().unwrap()),
-                        Style::default().fg(if i.is_dir { Color::Blue } else { Color::White }),
-                    ))
-                }))
-                .block(Block::bordered().title(format!(
-                    "Files - {:?} {} ({:.0?})",
-                    cwd.file_name().unwrap(),
-                    items.len(),
-                    elapsed
-                )))
-                .style(Style::new().white())
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::Yellow)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("> ")
-                .repeat_highlight_symbol(true)
-                .direction(ListDirection::TopToBottom);
-
-                frame.render_stateful_widget(list, frame.area(), &mut list_state);
+                list.render(
+                    frame,
+                    format!(
+                        "Files - {:?} {} ({:.0?})",
+                        cwd.file_name().unwrap(),
+                        list.items.len(),
+                        elapsed
+                    ),
+                );
             })
             .expect("failed to draw frame");
 
         let mut interact = || {
-            if let Some(selected) = list_state.selected() {
-                let i = &items[selected];
+            if let Some(selected) = list.state.selected() {
+                let i = &list.items[selected];
                 if i.is_dir {
                     cwd = i.path.clone();
                     depths.push(selected);
-                    items = tree.get(&cwd);
+                    list.items = tree.get(&cwd);
                 } else {
                     Command::new("xdg-open")
                         .arg(i.path.clone())
@@ -175,18 +192,17 @@ fn main() {
                 }
             }
         };
-
         match event::read().unwrap() {
             Event::Key(key) => match key.code {
-                KeyCode::Char('k') => list_state.select_previous(),
-                KeyCode::Char('j') => list_state.select_next(),
-                KeyCode::Char('G') => list_state.select_last(),
-                KeyCode::Char('g') => list_state.select_first(),
+                KeyCode::Char('k') => list.state.select_previous(),
+                KeyCode::Char('j') => list.state.select_next(),
+                KeyCode::Char('G') => list.state.select_last(),
+                KeyCode::Char('g') => list.state.select_first(),
                 KeyCode::Char('-') => {
                     if depths.len() >= 2 {
                         cwd.pop();
-                        items = tree.get(&cwd);
-                        list_state.select(Some(depths.pop().unwrap()));
+                        list.items = tree.get(&cwd);
+                        list.state.select(Some(depths.pop().unwrap()));
                     }
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
@@ -198,16 +214,16 @@ fn main() {
             Event::Mouse(MouseEvent { kind, row, .. }) => match kind {
                 // https://docs.rs/crossterm/latest/crossterm/event/enum.MouseEventKind.html
                 MouseEventKind::Down(_) => {
-                    if row >= list_area.y && row < list_area.y + list_area.height {
-                        let index = (row - list_area.y - 1) as usize;
-                        if let Some(selected) = list_state.selected() {
+                    if row >= list.area.y && row < list.area.y + list.area.height {
+                        let index = (row - list.area.y - 1) as usize;
+                        if let Some(selected) = list.state.selected() {
                             if selected == index {
                                 interact();
                             } else {
-                                list_state.select(Some(index));
+                                list.state.select(Some(index));
                             }
                         } else {
-                            list_state.select(Some(index));
+                            list.state.select(Some(index));
                         }
                     }
                 }
