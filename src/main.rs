@@ -87,7 +87,7 @@ fn scan(folder: &Path) -> Tree {
 fn main() {
     // let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
     let mut cwd = Path::new("/home/kjc/closet").to_path_buf();
-    let mut depth = 0;
+    let mut depths = vec![0];
     let now = Instant::now();
     let mut tree = scan(&cwd);
     tree.accumulate();
@@ -143,10 +143,10 @@ fn main() {
                 KeyCode::Char('G') => list_state.select_last(),
                 KeyCode::Char('g') => list_state.select_first(),
                 KeyCode::Char('-') => {
-                    if depth - 1 >= 0 {
-                        depth -= 1;
+                    if depths.len() >= 2 {
                         cwd.pop();
                         items = tree.get(&cwd);
+                        list_state.select(Some(depths.pop().unwrap()));
                     }
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
@@ -155,7 +155,7 @@ fn main() {
                         let i = &items[selected];
                         if i.is_dir {
                             cwd = i.path.clone();
-                            depth += 1;
+                            depths.push(selected);
                             items = tree.get(&cwd);
                         } else {
                             Command::new("xdg-open")
