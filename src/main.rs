@@ -1,35 +1,26 @@
 use bytesize::ByteSize;
-use ratatui::layout::Constraint;
-use ratatui::layout::Direction;
-use ratatui::style::Color;
-use ratatui::style::Modifier;
-use ratatui::symbols::scrollbar;
+use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::ExecutableCommand;
+use ratatui::prelude::CrosstermBackend;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
-use ratatui::widgets::Scrollbar;
-use ratatui::widgets::ScrollbarOrientation;
-use ratatui::widgets::ScrollbarState;
-use rayon::prelude::*;
-use std::alloc::Layout;
-use std::ffi::OsStr;
-use std::ffi::OsString;
-use std::fs;
-use std::fs::Metadata;
-use std::os::unix::fs::MetadataExt;
-use std::path::Component;
-use std::path::Components;
-use std::path::Path;
-use std::path::PathBuf;
-use std::time::Instant;
-use std::{collections::HashMap, time::Duration};
-use walkdir::DirEntry;
-
-use crossterm::event::{self, Event, KeyCode};
+use ratatui::Terminal;
 use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     widgets::{Block, List, ListDirection, ListItem, ListState},
-    Frame,
 };
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::Metadata;
+use std::io;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 struct Info {
@@ -137,16 +128,22 @@ fn main() {
     let tree = scan(&cwd);
     let elapsed = now.elapsed();
 
-    let mut terminal = ratatui::init();
+    enable_raw_mode().unwrap();
+    let mut stdout = io::stdout();
+    stdout.execute(EnterAlternateScreen).unwrap();
+    crossterm::execute!(stdout, crossterm::event::EnableMouseCapture).unwrap();
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).unwrap();
 
     let mut list_state = ListState::default();
-    let mut scroll_state = ScrollbarState::default();
+    let mut list_area = Rect::default();
     list_state.select(Some(0));
 
     let mut items: Vec<_> = tree.get(&cwd);
     loop {
         terminal
             .draw(|frame| {
+                list_area = frame.area();
                 let list = List::new(items.clone().into_iter().map(|(k, i)| {
                     ListItem::new(Span::styled(
                         format!("{:>8} {:?}", ByteSize(i.size), k),
@@ -170,18 +167,12 @@ fn main() {
                 .repeat_highlight_symbol(true)
                 .direction(ListDirection::TopToBottom);
 
-                let scrollbar = Scrollbar::default()
-                    .orientation(ScrollbarOrientation::VerticalRight)
-                    .symbols(scrollbar::VERTICAL)
-                    .begin_symbol(None)
-                    .end_symbol(None);
-
                 frame.render_stateful_widget(list, frame.area(), &mut list_state);
             })
             .expect("failed to draw frame");
 
-        if let Event::Key(key) = event::read().unwrap() {
-            match key.code {
+        match event::read().unwrap() {
+            Event::Key(key) => match key.code {
                 KeyCode::Char('k') => list_state.select_previous(),
                 KeyCode::Char('j') => list_state.select_next(),
                 KeyCode::Char('G') => list_state.select_last(),
@@ -205,8 +196,27 @@ fn main() {
                     }
                 }
                 _ => {}
-            }
+            },
+            Event::Mouse(MouseEvent { kind, row, .. }) => match kind {
+                MouseEventKind::Down(_) => {
+                    if row >= list_area.y && row < list_area.y + list_area.height {
+                        let index = (row - list_area.y - 1) as usize;
+                        if index < items.len() {
+                            list_state.select(Some(index));
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => continue,
         }
     }
-    ratatui::restore();
+
+    disable_raw_mode().unwrap();
+    crossterm::execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )
+    .unwrap();
 }
