@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::process::Command;
 use std::time::Instant;
 use walkdir::DirEntry;
 
@@ -181,6 +182,8 @@ fn main() {
                             cwd.push(k);
                             depth += 1;
                             items = tree.get(&cwd);
+                        } else {
+                            Command::new("xdg-open").arg(cwd.join(k)).spawn().unwrap();
                         }
                     }
                 }
