@@ -14,108 +14,83 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use walkdir::DirEntry;
 
 #[derive(Debug, Clone)]
 struct Info {
+    path: PathBuf,
     size: u64,
     is_dir: bool,
 }
 
-impl Info {
-    fn new() -> Info {
-        return Info {
-            size: 0,
-            is_dir: true,
-        };
-    }
-}
-
 #[derive(Debug, Clone)]
 struct Tree {
-    info: Info,
-    children: HashMap<OsString, Tree>,
+    data: Vec<Info>,
 }
 
 impl Tree {
-    fn insert(self: &mut Self, p: &DirEntry) {
-        let mut t = self;
-        for segment in p.path().components().skip(1) {
-            let segment = segment.as_os_str().to_os_string();
-            if !t.children.contains_key(&segment) {
-                t.children.insert(
-                    segment.clone(),
-                    Tree {
-                        info: Info::new(),
-                        children: HashMap::new(),
-                    },
-                );
+    fn accumulate(self: &mut Self) {
+        let mut sums: [u64; 4096] = [0; 4096];
+        let mut prev_depth = 0;
+        for i in (0..self.data.len()).rev() {
+            let depth = self.data[i].path.components().count();
+            if depth < prev_depth {
+                self.data[i].size += sums[prev_depth];
+                sums[prev_depth] = 0;
             }
-            t = t.children.get_mut(&segment).unwrap();
-        }
-        let metadata = p.metadata().unwrap();
-        t.info = Info {
-            size: metadata.size(),
-            is_dir: metadata.is_dir(),
-        };
-    }
-
-    fn init(self: &mut Self) {
-        if self.info.is_dir {
-            for (_, tree) in self.children.iter_mut() {
-                tree.init();
-            }
-            self.info.size = self.children.values().map(|tree| tree.info.size).sum();
+            sums[depth] += self.data[i].size;
+            prev_depth = depth;
         }
     }
 
-    fn get(self: &Self, p: &Path) -> Vec<(&str, Info)> {
-        let mut items: Vec<_> = self
-            .find(&p)
-            .children
+    fn get(self: &Self, p: &Path) -> Vec<Info> {
+        let start = self
+            .data
+            .binary_search_by(|x| x.path.cmp(&p.to_path_buf()))
+            .unwrap();
+        let end = self.data[start..]
+            .into_iter()
+            .position(|x| !x.path.starts_with(&p.to_path_buf()))
+            .unwrap_or(self.data.len());
+
+        let mut items: Vec<Info> = self.data[start..start + end]
             .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.info.clone()))
+            .filter(|x| x.path.components().count() == p.components().count() + 1)
+            .cloned()
             .collect();
-        items.sort_by(|(_, a), (_, b)| b.size.cmp(&a.size));
+        items.sort_by(|a, b| b.size.cmp(&a.size));
         items
-    }
-
-    fn find(self: &Self, p: &Path) -> &Tree {
-        let mut t = self;
-        for segment in p.components().skip(1) {
-            t = &t.children[&segment.as_os_str().to_os_string()];
-        }
-        return t;
     }
 }
 
 fn scan(folder: &Path) -> Tree {
-    let mut tree = Tree {
-        info: Info::new(),
-        children: HashMap::new(),
-    };
-    for p in walkdir::WalkDir::new(folder)
+    let data: Vec<_> = jwalk::WalkDir::new(folder)
+        .sort(true)
         .into_iter()
         .filter_map(Result::ok)
-    {
-        tree.insert(&p);
-    }
-    tree.init();
-    tree
+        .map(|x| {
+            let metadata = x.metadata().unwrap();
+            Info {
+                path: x.path().to_path_buf(),
+                size: metadata.size(),
+                is_dir: metadata.is_dir(),
+            }
+        })
+        .collect();
+    Tree { data }
 }
 
 fn main() {
+    // let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
     let mut cwd = Path::new("/home/kjc/closet").to_path_buf();
     let mut depth = 0;
     let now = Instant::now();
-    let tree = scan(&cwd);
+    let mut tree = scan(&cwd);
+    tree.accumulate();
     let elapsed = now.elapsed();
 
     enable_raw_mode().unwrap();
@@ -134,9 +109,9 @@ fn main() {
         terminal
             .draw(|frame| {
                 list_area = frame.area();
-                let list = List::new(items.clone().into_iter().map(|(k, i)| {
+                let list = List::new(items.clone().into_iter().map(|i| {
                     ListItem::new(Span::styled(
-                        format!("{:>8} {:?}", ByteSize(i.size), k),
+                        format!("{:>8} {:?}", ByteSize(i.size), i.path.file_name().unwrap()),
                         Style::default().fg(if i.is_dir { Color::Blue } else { Color::White }),
                     ))
                 }))
@@ -177,13 +152,16 @@ fn main() {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Enter => {
                     if let Some(selected) = list_state.selected() {
-                        let (k, v) = &items[selected];
-                        if v.is_dir {
-                            cwd.push(k);
+                        let i = &items[selected];
+                        if i.is_dir {
+                            cwd = i.path.clone();
                             depth += 1;
                             items = tree.get(&cwd);
                         } else {
-                            Command::new("xdg-open").arg(cwd.join(k)).spawn().unwrap();
+                            Command::new("xdg-open")
+                                .arg(i.path.clone())
+                                .spawn()
+                                .unwrap();
                         }
                     }
                 }
