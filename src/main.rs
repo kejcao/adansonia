@@ -84,6 +84,23 @@ fn scan(folder: &Path) -> Tree {
     Tree { data }
 }
 
+struct StatefulList {
+    state: ListState,
+    items: Vec<Info>,
+}
+
+impl StatefulList {
+    // fn new(items: Vec<info>) -> StatefulList<T> {
+    //     let mut state = ListState::default();
+    //     state.select(Some(0));
+    //     StatefulList { state, items }
+    // }
+    //
+    // fn select(&mut self, index: Option<usize>) {
+    //     self.state.select(index);
+    // }
+}
+
 fn main() {
     // let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
     let mut cwd = Path::new("/home/kjc/closet").to_path_buf();
@@ -136,6 +153,22 @@ fn main() {
             })
             .expect("failed to draw frame");
 
+        let mut activate = || {
+            if let Some(selected) = list_state.selected() {
+                let i = &items[selected];
+                if i.is_dir {
+                    cwd = i.path.clone();
+                    depths.push(selected);
+                    items = tree.get(&cwd);
+                } else {
+                    Command::new("xdg-open")
+                        .arg(i.path.clone())
+                        .spawn()
+                        .unwrap();
+                }
+            }
+        };
+
         match event::read().unwrap() {
             Event::Key(key) => match key.code {
                 KeyCode::Char('k') => list_state.select_previous(),
@@ -151,19 +184,7 @@ fn main() {
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Enter => {
-                    if let Some(selected) = list_state.selected() {
-                        let i = &items[selected];
-                        if i.is_dir {
-                            cwd = i.path.clone();
-                            depths.push(selected);
-                            items = tree.get(&cwd);
-                        } else {
-                            Command::new("xdg-open")
-                                .arg(i.path.clone())
-                                .spawn()
-                                .unwrap();
-                        }
-                    }
+                    activate();
                 }
                 _ => {}
             },
@@ -171,7 +192,13 @@ fn main() {
                 MouseEventKind::Down(_) => {
                     if row >= list_area.y && row < list_area.y + list_area.height {
                         let index = (row - list_area.y - 1) as usize;
-                        if index < items.len() {
+                        if let Some(selected) = list_state.selected() {
+                            if selected == index {
+                                activate();
+                            } else {
+                                list_state.select(Some(index));
+                            }
+                        } else {
                             list_state.select(Some(index));
                         }
                     }
