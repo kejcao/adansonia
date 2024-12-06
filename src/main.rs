@@ -4,6 +4,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use jwalk::Parallelism;
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
@@ -14,13 +15,14 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use rayon::prelude::*;
+use std::fs::Metadata;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Info {
     path: PathBuf,
     size: u64,
@@ -68,18 +70,24 @@ impl Tree {
 }
 
 fn scan(folder: &Path) -> Tree {
-    let data: Vec<_> = jwalk::WalkDir::new(folder)
+    let data: Vec<_> = jwalk::WalkDirGeneric::<((), Info)>::new(folder)
+        .parallelism(Parallelism::RayonNewPool(16))
         .sort(true)
-        .into_iter()
-        .filter_map(Result::ok)
-        .map(|x| {
-            let metadata = x.metadata().unwrap();
-            Info {
-                path: x.path().to_path_buf(),
-                size: metadata.size(),
-                is_dir: metadata.is_dir(),
-            }
+        .skip_hidden(false)
+        .process_read_dir(|_, _, _, dir_entry_results| {
+            dir_entry_results.iter_mut().for_each(|x| {
+                if let Ok(dir_entry) = x {
+                    let metadata = dir_entry.metadata().unwrap();
+                    dir_entry.client_state = Info {
+                        path: dir_entry.path().to_path_buf(),
+                        size: metadata.size(),
+                        is_dir: metadata.is_dir(),
+                    }
+                }
+            })
         })
+        .into_iter()
+        .map(|x| x.unwrap().client_state)
         .collect();
     Tree { data }
 }
@@ -102,8 +110,7 @@ impl StatefulList {
 }
 
 fn main() {
-    // let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
-    let mut cwd = Path::new("/home/kjc/closet").to_path_buf();
+    let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
     let mut depths = vec![0];
     let now = Instant::now();
     let mut tree = scan(&cwd);
@@ -153,7 +160,7 @@ fn main() {
             })
             .expect("failed to draw frame");
 
-        let mut activate = || {
+        let mut interact = || {
             if let Some(selected) = list_state.selected() {
                 let i = &items[selected];
                 if i.is_dir {
@@ -184,17 +191,18 @@ fn main() {
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Enter => {
-                    activate();
+                    interact();
                 }
                 _ => {}
             },
             Event::Mouse(MouseEvent { kind, row, .. }) => match kind {
+                // https://docs.rs/crossterm/latest/crossterm/event/enum.MouseEventKind.html
                 MouseEventKind::Down(_) => {
                     if row >= list_area.y && row < list_area.y + list_area.height {
                         let index = (row - list_area.y - 1) as usize;
                         if let Some(selected) = list_state.selected() {
                             if selected == index {
-                                activate();
+                                interact();
                             } else {
                                 list_state.select(Some(index));
                             }
