@@ -16,11 +16,11 @@ use ratatui::{
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::Metadata;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
+use walkdir::DirEntry;
 
 #[derive(Debug, Clone)]
 struct Info {
@@ -44,14 +44,12 @@ struct Tree {
 }
 
 impl Tree {
-    fn insert(
-        self: &mut Self,
-        metadata: Metadata,
-        components: &mut impl Iterator<Item = OsString>,
-    ) {
-        if let Some(segment) = components.next() {
-            if !self.children.contains_key(&segment) {
-                self.children.insert(
+    fn insert(self: &mut Self, p: &DirEntry) {
+        let mut t = self;
+        for segment in p.path().components().skip(1) {
+            let segment = segment.as_os_str().to_os_string();
+            if !t.children.contains_key(&segment) {
+                t.children.insert(
                     segment.clone(),
                     Tree {
                         info: Info::new(),
@@ -59,15 +57,13 @@ impl Tree {
                     },
                 );
             }
-            self.children
-                .entry(segment)
-                .and_modify(|t| t.insert(metadata, components));
-        } else {
-            self.info = Info {
-                size: metadata.size(),
-                is_dir: metadata.is_dir(),
-            };
+            t = t.children.get_mut(&segment).unwrap();
         }
+        let metadata = p.metadata().unwrap();
+        t.info = Info {
+            size: metadata.size(),
+            is_dir: metadata.is_dir(),
+        };
     }
 
     fn init(self: &mut Self) {
@@ -108,21 +104,14 @@ fn scan(folder: &Path) -> Tree {
         .into_iter()
         .filter_map(Result::ok)
     {
-        tree.insert(
-            p.metadata().unwrap(),
-            &mut p
-                .path()
-                .components()
-                .skip(1)
-                .map(|x| x.as_os_str().to_os_string()),
-        );
+        tree.insert(&p);
     }
     tree.init();
     tree
 }
 
 fn main() {
-    let mut cwd = Path::new("/home/kjc/Downloads").to_path_buf();
+    let mut cwd = Path::new("/home/kjc/closet").to_path_buf();
     let mut depth = 0;
     let now = Instant::now();
     let tree = scan(&cwd);
