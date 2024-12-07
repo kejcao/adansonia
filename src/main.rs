@@ -16,7 +16,6 @@ use ratatui::{
 use ratatui::{Frame, Terminal};
 use rayon::prelude::*;
 use std::env;
-use std::fs::Metadata;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -76,14 +75,18 @@ fn scan(folder: &Path) -> Tree {
         .sort(true)
         .skip_hidden(false)
         .process_read_dir(|_, _, _, dir_entry_results| {
-            dir_entry_results.iter_mut().for_each(|x| {
-                if let Ok(dir_entry) = x {
+            dir_entry_results.iter_mut().for_each(|x| match x {
+                Ok(dir_entry) => {
                     let metadata = dir_entry.metadata().unwrap();
                     dir_entry.client_state = Info {
                         path: dir_entry.path().to_path_buf(),
                         size: metadata.size(),
                         is_dir: metadata.is_dir(),
                     }
+                }
+                Err(x) => {
+                    eprintln!("Unable to index, error encountered: {:?}", x);
+                    exit(1);
                 }
             })
         })
@@ -141,9 +144,9 @@ fn main() {
         exit(1);
     }
     let mut cwd = if args.len() == 2 {
-        Path::new(&args[1]).to_path_buf()
+        Path::new(&args[1]).to_path_buf().canonicalize().unwrap()
     } else {
-        Path::new(".").to_path_buf()
+        Path::new(".").to_path_buf().canonicalize().unwrap()
     };
 
     let now = Instant::now();
