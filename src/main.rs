@@ -14,7 +14,6 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use ratatui::{Frame, Terminal};
-use rayon::prelude::*;
 use std::env;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -215,7 +214,6 @@ fn main() {
                 _ => {}
             },
             Event::Mouse(MouseEvent { kind, row, .. }) => match kind {
-                // https://docs.rs/crossterm/latest/crossterm/event/enum.MouseEventKind.html
                 MouseEventKind::Down(_) => {
                     if row >= list.area.y && row < list.area.y + list.area.height {
                         let index = (row - list.area.y - 1) as usize;
@@ -229,6 +227,12 @@ fn main() {
                             list.state.select(Some(index));
                         }
                     }
+                }
+                MouseEventKind::ScrollDown => {
+                    list.state.select_next();
+                }
+                MouseEventKind::ScrollUp => {
+                    list.state.select_previous();
                 }
                 _ => {}
             },
