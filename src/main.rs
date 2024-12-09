@@ -1,4 +1,5 @@
 use bytesize::ByteSize;
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,7 +15,6 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use ratatui::{Frame, Terminal};
-use std::env;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -136,22 +136,27 @@ impl StatefulList {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(default_value = ".")]
+    directory: PathBuf,
+    #[arg(long, short, action)]
+    benchmark: bool,
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 2 {
-        eprintln!("usage: adansonia [directory]");
-        exit(1);
-    }
-    let mut cwd = if args.len() == 2 {
-        Path::new(&args[1]).to_path_buf().canonicalize().unwrap()
-    } else {
-        Path::new(".").to_path_buf().canonicalize().unwrap()
-    };
+    let args = Args::parse();
+    let mut cwd = args.directory;
 
     let now = Instant::now();
     let mut tree = scan(&cwd);
     tree.accumulate();
     let elapsed = now.elapsed();
+
+    if args.benchmark {
+        exit(0);
+    }
 
     enable_raw_mode().unwrap();
     let mut stdout = io::stdout();
