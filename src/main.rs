@@ -15,6 +15,7 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use ratatui::{Frame, Terminal};
+use std::cmp::Ordering;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -53,10 +54,7 @@ impl Tree {
             .data
             .binary_search_by(|x| x.path.cmp(&p.to_path_buf()))
             .unwrap();
-        let end = self.data[start..]
-            .into_iter()
-            .position(|x| !x.path.starts_with(&p.to_path_buf()))
-            .unwrap_or(self.data.len());
+        let end = self.data[start..].partition_point(|x| x.path.starts_with(&p.to_path_buf()));
 
         let mut items: Vec<Info> = self.data[start..start + end]
             .iter()
@@ -147,7 +145,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let mut cwd = args.directory;
+    let mut cwd = args.directory.canonicalize().unwrap();
 
     let now = Instant::now();
     let mut tree = scan(&cwd);
