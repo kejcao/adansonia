@@ -15,7 +15,6 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use ratatui::{Frame, Terminal};
-use std::cmp::Ordering;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -25,6 +24,7 @@ use std::time::Instant;
 #[derive(Debug, Clone, Default)]
 struct Info {
     path: PathBuf,
+    depth: usize,
     size: u64,
     is_dir: bool,
 }
@@ -39,7 +39,7 @@ impl Tree {
         let mut sums: [u64; 4096] = [0; 4096];
         let mut prev_depth = 0;
         for i in (0..self.data.len()).rev() {
-            let depth = self.data[i].path.components().count();
+            let depth = self.data[i].depth;
             if depth < prev_depth {
                 self.data[i].size += sums[prev_depth];
                 sums[prev_depth] = 0;
@@ -56,9 +56,10 @@ impl Tree {
             .unwrap();
         let end = self.data[start..].partition_point(|x| x.path.starts_with(&p.to_path_buf()));
 
+        let target = p.components().count() + 1;
         let mut items: Vec<Info> = self.data[start..start + end]
             .iter()
-            .filter(|x| x.path.components().count() == p.components().count() + 1)
+            .filter(|x| x.depth == target)
             .cloned()
             .collect();
         items.sort_by(|a, b| b.size.cmp(&a.size));
@@ -77,6 +78,7 @@ fn scan(folder: &Path) -> Tree {
                     let metadata = dir_entry.metadata().unwrap();
                     dir_entry.client_state = Info {
                         path: dir_entry.path().to_path_buf(),
+                        depth: dir_entry.path().components().count(),
                         size: metadata.size(),
                         is_dir: metadata.is_dir(),
                     }
