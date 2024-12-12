@@ -1,5 +1,6 @@
 use bytesize::ByteSize;
 use clap::Parser;
+use core::num;
 use crossbeam_deque::{Steal, Worker};
 use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
@@ -16,11 +17,17 @@ use ratatui::{
 };
 use ratatui::{Frame, Terminal};
 use rayon::slice::ParallelSliceMut;
+use std::ffi::OsStr;
 use std::io;
+use std::ops::AddAssign;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
-use std::time::Instant;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +88,18 @@ impl Tree {
     }
 }
 
+fn commaify<T: ToString>(i: T) -> String {
+    return i
+        .to_string()
+        .as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(std::str::from_utf8)
+        .collect::<Result<Vec<&str>, _>>()
+        .unwrap()
+        .join(",");
+}
+
 fn scan(root: &Path) -> Tree {
     let now = Instant::now();
 
@@ -93,17 +112,33 @@ fn scan(root: &Path) -> Tree {
         .collect();
     let stealers: Vec<_> = workers.iter().map(|w| w.stealer()).collect();
 
+    let (tx, rx) = mpsc::channel::<bool>();
+    let progress_handle = thread::spawn(move || {
+        let mut i = 0;
+        loop {
+            if !rx.recv().unwrap() {
+                break;
+            }
+            i += 100;
+            if i % 10_000 == 0 {
+                println!(" indexed {}\x1b[F", commaify(i));
+            }
+        }
+    });
+
     workers[0].push(PathBuf::from(root));
     let handles: Vec<_> = workers
         .into_iter()
         .enumerate()
         .map(|(i, worker)| {
+            let progress_tx = tx.clone();
             let mut stealers = stealers.clone();
             stealers.remove(i); // remove our own stealer
             stealers.rotate_right(i); // so no one stealer is swamped
 
             thread::spawn(move || {
                 let mut result: Vec<Info> = vec![];
+
                 loop {
                     let path = worker
                         .pop() // try to take from local stack
@@ -118,6 +153,7 @@ fn scan(root: &Path) -> Tree {
                             }
                             None // if all stealers are empty, then exit thread.
                         });
+                    // *progress[i].lock().unwrap() = result.len().into();
 
                     // now path is some Some(path) to crawl, or None
                     if let Some(path) = path {
@@ -136,9 +172,17 @@ fn scan(root: &Path) -> Tree {
                                 result.push(Info {
                                     path: entry.path().to_path_buf(),
                                     depth: entry.path().components().count(),
-                                    size: metadata.size(),
+                                    size: if metadata.is_dir() {
+                                        0
+                                    } else {
+                                        metadata.size()
+                                    },
                                     is_dir: metadata.is_dir(),
                                 });
+
+                                if result.len() % 100 == 0 {
+                                    progress_tx.send(true).unwrap();
+                                }
                                 if metadata.is_dir() {
                                     worker.push(entry.path().to_path_buf());
                                 }
@@ -164,8 +208,15 @@ fn scan(root: &Path) -> Tree {
         result.append(&mut handle.join().unwrap());
     }
 
+    tx.send(false).unwrap();
+    progress_handle.join().unwrap();
+
     let elapsed = now.elapsed();
-    println!("{} items indexed in {:.2?}", result.len(), elapsed);
+    println!(
+        "{} items indexed in {:.2?}",
+        commaify(result.len()),
+        elapsed
+    );
     return Tree { data: result };
 }
 
@@ -176,13 +227,13 @@ struct StatefulList {
 }
 
 impl StatefulList {
-    fn new() -> StatefulList {
+    fn new(items: Vec<Info>) -> StatefulList {
         let mut state = ListState::default();
         state.select(Some(0));
         StatefulList {
             state,
             area: Rect::default(),
-            items: vec![],
+            items,
         }
     }
 
@@ -191,6 +242,7 @@ impl StatefulList {
         let list = List::new(self.items.clone().into_iter().map(|i| {
             ListItem::new(Span::styled(
                 format!("{:>8} {:?}", ByteSize(i.size), i.path.file_name().unwrap()),
+                // format!("{:>16} {:?}", i.size, i.path.file_name().unwrap()), // for debugging
                 Style::default().fg(if i.is_dir { Color::Blue } else { Color::White }),
             ))
         }))
@@ -236,9 +288,8 @@ fn main() {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let mut depths = vec![0]; // to restore selections when moving back
-    let mut list: StatefulList = StatefulList::new();
-    list.items = tree.get(&cwd);
+    let mut depths = vec![0]; // to restore selection positions when moving back
+    let mut list: StatefulList = StatefulList::new(tree.get(&cwd));
 
     let size = ByteSize(tree.data[tree.data.binary_search_by(|x| x.path.cmp(&cwd)).unwrap()].size);
     loop {
@@ -248,7 +299,7 @@ fn main() {
                     frame,
                     format!(
                         "Files - {:?} {} ({})",
-                        cwd.file_name().unwrap(),
+                        cwd.file_name().unwrap_or(OsStr::new("/")),
                         list.items.len(),
                         size,
                     ),
