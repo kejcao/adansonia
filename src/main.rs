@@ -1,11 +1,11 @@
 use bytesize::ByteSize;
 use clap::Parser;
+use crossbeam_deque::{Steal, Worker};
 use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use jwalk::Parallelism;
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
@@ -20,6 +20,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 use std::time::Instant;
+use std::{fs, thread};
 
 #[derive(Debug, Clone, Default)]
 struct Info {
@@ -68,31 +69,85 @@ impl Tree {
 }
 
 fn scan(folder: &Path) -> Tree {
-    let data: Vec<_> = jwalk::WalkDirGeneric::<((), Info)>::new(folder)
-        .parallelism(Parallelism::RayonNewPool(16))
-        .sort(true)
-        .skip_hidden(false)
-        .process_read_dir(|_, _, _, dir_entry_results| {
-            dir_entry_results.iter_mut().for_each(|x| match x {
-                Ok(dir_entry) => {
-                    let metadata = dir_entry.metadata().unwrap();
-                    dir_entry.client_state = Info {
-                        path: dir_entry.path().to_path_buf(),
-                        depth: dir_entry.path().components().count(),
-                        size: metadata.size(),
-                        is_dir: metadata.is_dir(),
-                    }
-                }
-                Err(x) => {
-                    eprintln!("Unable to index, error encountered: {:?}", x);
-                    exit(1);
-                }
-            })
-        })
-        .into_iter()
-        .map(|x| x.unwrap().client_state)
+    let num_threads = 16;
+    let workers: Vec<_> = (0..num_threads)
+        .map(|_| Worker::<PathBuf>::new_fifo())
         .collect();
-    Tree { data }
+    let stealers: Vec<_> = workers.iter().map(|w| w.stealer()).collect();
+
+    workers[0].push(PathBuf::from(folder));
+    thread::scope(|s| {
+        let handles: Vec<_> = workers
+            .into_iter()
+            .enumerate()
+            .map(|(i, worker)| {
+                let mut stealers = stealers.clone();
+                stealers.remove(i);
+                stealers.rotate_right(i);
+
+                s.spawn(move || {
+                    let mut result = vec![];
+                    'main: loop {
+                        let p;
+                        'outer: {
+                            if let Some(i) = worker.pop() {
+                                p = i;
+                            } else {
+                                for s in &stealers {
+                                    loop {
+                                        match s.steal() {
+                                            Steal::Success(i) => {
+                                                p = i;
+                                                break 'outer;
+                                            }
+                                            Steal::Empty => break,
+                                            Steal::Retry => (),
+                                        }
+                                    }
+                                }
+                                break 'main;
+                            }
+                        };
+
+                        let _ = fs::read_dir(p).map(|it| {
+                            for entry in it {
+                                let entry = entry.unwrap();
+                                let ft = entry.file_type().unwrap();
+                                if ft.is_symlink() {
+                                    continue;
+                                }
+
+                                let metadata = entry.metadata().unwrap();
+
+                                result.push(Info {
+                                    path: entry.path().to_path_buf(),
+                                    depth: entry.path().components().count(),
+                                    size: metadata.size(),
+                                    is_dir: metadata.is_dir(),
+                                });
+                                if ft.is_dir() {
+                                    worker.push(entry.path().to_path_buf());
+                                }
+                            }
+                        });
+                    }
+                    result
+                })
+            })
+            .collect();
+
+        let mut result = vec![Info {
+            path: folder.to_path_buf(),
+            depth: folder.components().count(),
+            size: folder.metadata().unwrap().size(),
+            is_dir: true,
+        }];
+        for handle in handles {
+            result.append(&mut handle.join().unwrap());
+        }
+        result.sort_by(|a, b| a.path.cmp(&b.path));
+        return Tree { data: result };
+    })
 }
 
 struct StatefulList {
@@ -108,7 +163,7 @@ impl StatefulList {
         StatefulList {
             state,
             area: Rect::default(),
-            items: Vec::new(),
+            items: vec![],
         }
     }
 

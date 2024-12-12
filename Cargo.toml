@@ -1,0 +1,11 @@
+[package]
+name = "adansonia"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytesize = "1.3.0"
+clap = { version = "4.5.23", features = ["derive"] }
+crossbeam-deque = "0.8.5"
+crossterm = "0.28.1"
+ratatui = "0.29.0"
