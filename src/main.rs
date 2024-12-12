@@ -15,6 +15,7 @@ use ratatui::{
     widgets::{Block, List, ListDirection, ListItem, ListState},
 };
 use ratatui::{Frame, Terminal};
+use rayon::slice::ParallelSliceMut;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,18 @@ impl Tree {
         }
     }
 
+    fn preprocess(self: &mut Self) {
+        let now = Instant::now();
+        self.data.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        let elapsed = now.elapsed();
+        println!("data sorted in {:.2?}", elapsed);
+
+        let now = Instant::now();
+        self.accumulate();
+        let elapsed = now.elapsed();
+        println!("data accumulated in {:.2?}", elapsed);
+    }
+
     fn get(self: &Self, p: &Path) -> Vec<Info> {
         let start = self
             .data
@@ -68,56 +81,57 @@ impl Tree {
     }
 }
 
-fn scan(folder: &Path) -> Tree {
+fn scan(root: &Path) -> Tree {
+    let now = Instant::now();
+
+    let root_metadata = root.metadata().unwrap();
+    let root_device = root_metadata.dev();
+
     let num_threads = 16;
     let workers: Vec<_> = (0..num_threads)
-        .map(|_| Worker::<PathBuf>::new_fifo())
+        .map(|_| Worker::<PathBuf>::new_lifo())
         .collect();
     let stealers: Vec<_> = workers.iter().map(|w| w.stealer()).collect();
 
-    workers[0].push(PathBuf::from(folder));
-    thread::scope(|s| {
-        let handles: Vec<_> = workers
-            .into_iter()
-            .enumerate()
-            .map(|(i, worker)| {
-                let mut stealers = stealers.clone();
-                stealers.remove(i);
-                stealers.rotate_right(i);
+    workers[0].push(PathBuf::from(root));
+    let handles: Vec<_> = workers
+        .into_iter()
+        .enumerate()
+        .map(|(i, worker)| {
+            let mut stealers = stealers.clone();
+            stealers.remove(i); // remove our own stealer
+            stealers.rotate_right(i); // so no one stealer is swamped
 
-                s.spawn(move || {
-                    let mut result = vec![];
-                    'main: loop {
-                        let p;
-                        'outer: {
-                            if let Some(i) = worker.pop() {
-                                p = i;
-                            } else {
-                                for s in &stealers {
-                                    loop {
-                                        match s.steal() {
-                                            Steal::Success(i) => {
-                                                p = i;
-                                                break 'outer;
-                                            }
-                                            Steal::Empty => break,
-                                            Steal::Retry => (),
-                                        }
-                                    }
-                                }
-                                break 'main;
+            thread::spawn(move || {
+                let mut result: Vec<Info> = vec![];
+                loop {
+                    let path = worker
+                        .pop() // try to take from local stack
+                        .or_else(|| {
+                            for s in &stealers {
+                                // loop until steal is not Steal::Retry
+                                while let Some(_) = match s.steal() {
+                                    Steal::Success(path) => return Some(path),
+                                    Steal::Empty => None,
+                                    Steal::Retry => Some(()),
+                                } {}
                             }
-                        };
+                            None // if all stealers are empty, then exit thread.
+                        });
 
-                        let _ = fs::read_dir(p).map(|it| {
+                    // now path is some Some(path) to crawl, or None
+                    if let Some(path) = path {
+                        // sometimes fs::read_dir fails with permission error or whatever, in
+                        // which case we just ignore the error.
+                        let _ = fs::read_dir(path).map(|it| {
                             for entry in it {
                                 let entry = entry.unwrap();
-                                let ft = entry.file_type().unwrap();
-                                if ft.is_symlink() {
+
+                                // skip symlinks and files in different devices.
+                                let metadata = entry.metadata().unwrap();
+                                if metadata.is_symlink() || root_device != metadata.dev() {
                                     continue;
                                 }
-
-                                let metadata = entry.metadata().unwrap();
 
                                 result.push(Info {
                                     path: entry.path().to_path_buf(),
@@ -125,29 +139,34 @@ fn scan(folder: &Path) -> Tree {
                                     size: metadata.size(),
                                     is_dir: metadata.is_dir(),
                                 });
-                                if ft.is_dir() {
+                                if metadata.is_dir() {
                                     worker.push(entry.path().to_path_buf());
                                 }
                             }
                         });
+                    } else {
+                        // if path is None then exit thread.
+                        break;
                     }
-                    result
-                })
+                }
+                result
             })
-            .collect();
+        })
+        .collect();
 
-        let mut result = vec![Info {
-            path: folder.to_path_buf(),
-            depth: folder.components().count(),
-            size: folder.metadata().unwrap().size(),
-            is_dir: true,
-        }];
-        for handle in handles {
-            result.append(&mut handle.join().unwrap());
-        }
-        result.sort_by(|a, b| a.path.cmp(&b.path));
-        return Tree { data: result };
-    })
+    let mut result = vec![Info {
+        path: root.to_path_buf(),
+        depth: root.components().count(),
+        size: root_metadata.size(),
+        is_dir: true,
+    }];
+    for handle in handles {
+        result.append(&mut handle.join().unwrap());
+    }
+
+    let elapsed = now.elapsed();
+    println!("{} items indexed in {:.2?}", result.len(), elapsed);
+    return Tree { data: result };
 }
 
 struct StatefulList {
@@ -204,14 +223,11 @@ fn main() {
     let args = Args::parse();
     let mut cwd = args.directory.canonicalize().unwrap();
 
-    let now = Instant::now();
     let mut tree = scan(&cwd);
-    tree.accumulate();
-    let elapsed = now.elapsed();
-
     if args.benchmark {
         exit(0);
     }
+    tree.preprocess();
 
     enable_raw_mode().unwrap();
     let mut stdout = io::stdout();
@@ -224,16 +240,17 @@ fn main() {
     let mut list: StatefulList = StatefulList::new();
     list.items = tree.get(&cwd);
 
+    let size = ByteSize(tree.data[tree.data.binary_search_by(|x| x.path.cmp(&cwd)).unwrap()].size);
     loop {
         terminal
             .draw(|frame| {
                 list.render(
                     frame,
                     format!(
-                        "Files - {:?} {} ({:.0?})",
+                        "Files - {:?} {} ({})",
                         cwd.file_name().unwrap(),
                         list.items.len(),
-                        elapsed
+                        size,
                     ),
                 );
             })
