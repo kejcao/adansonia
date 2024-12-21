@@ -17,7 +17,7 @@ use ratatui::{
 use ratatui::{Frame, Terminal};
 use rayon::slice::ParallelSliceMut;
 use std::ffi::OsStr;
-use std::io;
+use std::{env, io};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -329,6 +329,16 @@ fn main() {
                     }
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('.') => {
+                    let original = env::current_dir().unwrap();
+                    env::set_current_dir(cwd.clone()).unwrap();
+                    Command::new("alacritty")
+                        .arg("-e")
+                        .arg("bash")
+                        .spawn()
+                        .unwrap();
+                    env::set_current_dir(original).unwrap();
+                }
                 KeyCode::Enter => {
                     interact();
                 }
