@@ -1,6 +1,5 @@
 use bytesize::ByteSize;
 use clap::Parser;
-use core::num;
 use crossbeam_deque::{Steal, Worker};
 use crossterm::event::{self, Event, KeyCode, MouseEvent, MouseEventKind};
 use crossterm::terminal::{
@@ -19,18 +18,14 @@ use ratatui::{Frame, Terminal};
 use rayon::slice::ParallelSliceMut;
 use std::ffi::OsStr;
 use std::io;
-use std::ops::AddAssign;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::Instant;
 use std::{fs, thread};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 struct Info {
     path: PathBuf,
     depth: usize,
@@ -38,7 +33,6 @@ struct Info {
     is_dir: bool,
 }
 
-#[derive(Debug, Clone)]
 struct Tree {
     data: Vec<Info>,
 }
@@ -153,45 +147,44 @@ fn scan(root: &Path) -> Tree {
                             }
                             None // if all stealers are empty, then exit thread.
                         });
-                    // *progress[i].lock().unwrap() = result.len().into();
 
-                    // now path is some Some(path) to crawl, or None
-                    if let Some(path) = path {
-                        // sometimes fs::read_dir fails with permission error or whatever, in
-                        // which case we just ignore the error.
-                        let _ = fs::read_dir(path).map(|it| {
-                            for entry in it {
-                                let entry = entry.unwrap();
-
-                                // skip symlinks and files in different devices.
-                                let metadata = entry.metadata().unwrap();
-                                if metadata.is_symlink() || root_device != metadata.dev() {
-                                    continue;
-                                }
-
-                                result.push(Info {
-                                    path: entry.path().to_path_buf(),
-                                    depth: entry.path().components().count(),
-                                    size: if metadata.is_dir() {
-                                        0
-                                    } else {
-                                        metadata.size()
-                                    },
-                                    is_dir: metadata.is_dir(),
-                                });
-
-                                if result.len() % 100 == 0 {
-                                    progress_tx.send(true).unwrap();
-                                }
-                                if metadata.is_dir() {
-                                    worker.push(entry.path().to_path_buf());
-                                }
-                            }
-                        });
-                    } else {
-                        // if path is None then exit thread.
+                    if path.is_none() {
                         break;
                     }
+                    let path = path.unwrap();
+
+                    // sometimes fs::read_dir fails with permission error or whatever, in
+                    // which case we just ignore the error.
+                    let _ = fs::read_dir(path).map(|it| {
+                        for entry in it {
+                            let entry = entry.unwrap();
+
+                            // skip symlinks and files in different devices.
+                            let metadata = entry.metadata().unwrap();
+                            if metadata.is_symlink() || root_device != metadata.dev() {
+                                continue;
+                            }
+
+                            result.push(Info {
+                                path: entry.path().to_path_buf(),
+                                depth: entry.path().components().count(),
+                                size: if metadata.is_dir() {
+                                    0
+                                } else {
+                                    metadata.size()
+                                },
+                                is_dir: metadata.is_dir(),
+                            });
+                            if metadata.is_dir() {
+                                worker.push(entry.path().to_path_buf());
+                            }
+
+                            // update progress bar every now and then
+                            if result.len() % 100 == 0 {
+                                progress_tx.send(true).unwrap();
+                            }
+                        }
+                    });
                 }
                 result
             })
